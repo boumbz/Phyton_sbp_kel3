@@ -1,7 +1,14 @@
 """CLI expert system untuk rekomendasi jurusan kuliah berbasis forward chaining.
+
+Fitur tambahan:
+- Penyimpanan profil pengguna sederhana berbasis file JSON untuk operasi CRUD.
+- Mode CLI interaktif tetap tersedia untuk mencoba rekomendasi secara langsung.
 """
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Set, Tuple
+from pathlib import Path
+from typing import Callable, Dict, List, Optional, Set, Tuple
+import argparse
+import json
 import sys
 import unittest
 
@@ -438,38 +445,73 @@ class Recommender:
         return recommendations[:top_n]
 
 
+class ProfileStore:
+    def __init__(self, file_path: Path) -> None:
+        self.file_path = file_path
+        self._profiles: Dict[str, Dict[str, object]] = {}
+        self._load()
+
+    def _load(self) -> None:
+        if not self.file_path.exists():
+            return
+        with self.file_path.open("r", encoding="utf-8") as handle:
+            raw = json.load(handle)
+        for name, facts in raw.items():
+            facts["interests"] = set(facts.get("interests", []))
+            self._profiles[name] = facts
+
+    def _save(self) -> None:
+        serializable = {}
+        for name, facts in self._profiles.items():
+            serializable[name] = {
+                **facts,
+                "interests": sorted(facts.get("interests", [])),
+            }
+        with self.file_path.open("w", encoding="utf-8") as handle:
+            json.dump(serializable, handle, indent=2, ensure_ascii=False)
+
+    def create_or_update(self, name: str, facts: Dict[str, object]) -> None:
+        self._profiles[name] = facts
+        self._save()
+
+    def read(self, name: str) -> Optional[Dict[str, object]]:
+        return self._profiles.get(name)
+
+    def delete(self, name: str) -> bool:
+        if name not in self._profiles:
+            return False
+        del self._profiles[name]
+        self._save()
+        return True
+
+    def list_profiles(self) -> List[str]:
+        return sorted(self._profiles.keys())
+
+
 class CLI:
     VALID_INTERESTS = {"Realistic", "Investigative", "Artistic", "Social", "Enterprising", "Conventional"}
     VALID_STYLES = {"visual", "auditori", "kinestetik"}
     VALID_ENVIRONMENTS = {"riset", "industri", "kreatif"}
 
-    def __init__(self) -> None:
+    def __init__(self, datastore: Optional["ProfileStore"] = None) -> None:
         self.kb = KnowledgeBase()
         self.engine = InferenceEngine(self.kb)
         self.recommender = Recommender(self.kb, self.engine)
+        self.datastore = datastore
 
     def run(self) -> None:
         print("=== Rekomendasi Jurusan Kuliah (Expert System) ===")
-        interests = self._ask_interests()
-        grades = self._ask_grades()
-        learning_style = self._ask_option("Gaya belajar (visual/auditori/kinestetik)", self.VALID_STYLES)
-        environment = self._ask_option("Preferensi lingkungan (riset/industri/kreatif)", self.VALID_ENVIRONMENTS)
-        career_goal = input("Tujuan karier (contoh: dokter, developer, analis data): ").strip().lower()
-
-        facts = {
-            "interests": interests,
-            "math": grades["math"],
-            "physics": grades["physics"],
-            "biology": grades["biology"],
-            "chemistry": grades["chemistry"],
-            "language": grades["language"],
-            "learning_style": learning_style,
-            "environment": environment,
-            "career_goal": career_goal,
-        }
-
+        facts = self._collect_facts()
         recommendations = self.recommender.recommend(facts)
         self._display_results(recommendations)
+
+        if self.datastore:
+            save_choice = input("Simpan profil ini? (y/N): ").strip().lower()
+            if save_choice == "y":
+                name = input("Nama profil: ").strip()
+                if name:
+                    self.datastore.create_or_update(name, facts)
+                    print(f"Profil '{name}' tersimpan di {self.datastore.file_path}.")
 
     def _ask_interests(self) -> Set[str]:
         while True:
@@ -505,6 +547,25 @@ class CLI:
             if value in valid_options:
                 return value
             print(f"Pilihan tidak valid. Gunakan salah satu: {', '.join(sorted(valid_options))}.")
+
+    def _collect_facts(self) -> Dict[str, object]:
+        interests = self._ask_interests()
+        grades = self._ask_grades()
+        learning_style = self._ask_option("Gaya belajar (visual/auditori/kinestetik)", self.VALID_STYLES)
+        environment = self._ask_option("Preferensi lingkungan (riset/industri/kreatif)", self.VALID_ENVIRONMENTS)
+        career_goal = input("Tujuan karier (contoh: dokter, developer, analis data): ").strip().lower()
+
+        return {
+            "interests": interests,
+            "math": grades["math"],
+            "physics": grades["physics"],
+            "biology": grades["biology"],
+            "chemistry": grades["chemistry"],
+            "language": grades["language"],
+            "learning_style": learning_style,
+            "environment": environment,
+            "career_goal": career_goal,
+        }
 
     def _display_results(self, recommendations: List[Dict[str, object]]) -> None:
         if not recommendations:
@@ -583,12 +644,85 @@ class RecommendationTests(unittest.TestCase):
 
 
 def main() -> None:
-    if len(sys.argv) > 1 and sys.argv[1] == "--test":
+    parser = argparse.ArgumentParser(description="Expert system rekomendasi jurusan")
+    parser.add_argument(
+        "--test",
+        action="store_true",
+        help="Jalankan unit test",
+    )
+    parser.add_argument(
+        "--data-file",
+        default="profiles.json",
+        help="Lokasi file penyimpanan profil (default: profiles.json)",
+    )
+
+    subparsers = parser.add_subparsers(dest="command")
+    subparsers.add_parser("interactive", help="Mode interaktif (default)")
+
+    recommend_parser = subparsers.add_parser("recommend", help="Rekomendasikan berdasarkan profil tersimpan")
+    recommend_parser.add_argument("name", help="Nama profil yang akan digunakan")
+
+    subparsers.add_parser("list", help="Tampilkan semua profil tersimpan")
+
+    show_parser = subparsers.add_parser("show", help="Lihat detail profil")
+    show_parser.add_argument("name", help="Nama profil")
+
+    delete_parser = subparsers.add_parser("delete", help="Hapus profil")
+    delete_parser.add_argument("name", help="Nama profil")
+
+    args = parser.parse_args()
+
+    if args.test:
         suite = unittest.defaultTestLoader.loadTestsFromTestCase(RecommendationTests)
         runner = unittest.TextTestRunner(verbosity=2)
         result = runner.run(suite)
         sys.exit(not result.wasSuccessful())
-    CLI().run()
+
+    datastore = ProfileStore(Path(args.data_file))
+    command = args.command or "interactive"
+
+    if command == "interactive":
+        CLI(datastore=datastore).run()
+        return
+
+    if command == "list":
+        profiles = datastore.list_profiles()
+        if not profiles:
+            print("Belum ada profil tersimpan.")
+            return
+        print("Profil tersimpan:")
+        for name in profiles:
+            print(f"- {name}")
+        return
+
+    if command == "show":
+        facts = datastore.read(args.name)
+        if not facts:
+            print(f"Profil '{args.name}' tidak ditemukan.")
+            return
+        print(json.dumps(facts, indent=2, ensure_ascii=False))
+        return
+
+    if command == "delete":
+        if datastore.delete(args.name):
+            print(f"Profil '{args.name}' dihapus.")
+        else:
+            print(f"Profil '{args.name}' tidak ditemukan.")
+        return
+
+    if command == "recommend":
+        facts = datastore.read(args.name)
+        if not facts:
+            print(f"Profil '{args.name}' tidak ditemukan.")
+            return
+        kb = KnowledgeBase()
+        engine = InferenceEngine(kb)
+        recommender = Recommender(kb, engine)
+        recommendations = recommender.recommend(facts)
+        CLI()._display_results(recommendations)
+        return
+
+    parser.print_help()
 
 
 if __name__ == "__main__":
