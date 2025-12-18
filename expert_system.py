@@ -17,6 +17,7 @@ class Rule:
 class KnowledgeBase:
     def __init__(self) -> None:
         self.rules: List[Rule] = self._build_rules()
+        self.dynamic_rule_meta: Dict[str, Dict[str, object]] = {}
         self.total_weight_per_major: Dict[str, float] = self._compute_total_weights()
 
     def _build_rules(self) -> List[Rule]:
@@ -380,6 +381,71 @@ class KnowledgeBase:
             totals[rule.major] = totals.get(rule.major, 0.0) + rule.weight
         return totals
 
+    def _refresh_totals(self) -> None:
+        self.total_weight_per_major = self._compute_total_weights()
+
+    def list_rules(self) -> List[Rule]:
+        return list(self.rules)
+
+    def add_rule(self, rule: Rule, meta: Dict[str, object] | None = None) -> None:
+        self.rules.append(rule)
+        if meta is not None:
+            self.dynamic_rule_meta[rule.name] = meta
+        self._refresh_totals()
+
+    def delete_rule(self, name: str) -> bool:
+        for idx, rule in enumerate(self.rules):
+            if rule.name == name:
+                self.rules.pop(idx)
+                self.dynamic_rule_meta.pop(name, None)
+                self._refresh_totals()
+                return True
+        return False
+
+    def update_rule(
+        self,
+        name: str,
+        *,
+        major: str | None = None,
+        weight: float | None = None,
+        meta: Dict[str, object] | None = None,
+    ) -> bool:
+        for idx, rule in enumerate(self.rules):
+            if rule.name != name:
+                continue
+
+            if meta is not None:
+                condition = self._build_simple_condition(meta)
+                self.rules[idx] = Rule(
+                    name=rule.name,
+                    major=meta.get("major", rule.major),
+                    weight=meta.get("weight", rule.weight),
+                    condition=condition,
+                )
+                self.dynamic_rule_meta[name] = meta
+            else:
+                if major:
+                    rule.major = major
+                if weight is not None:
+                    rule.weight = weight
+
+            self._refresh_totals()
+            return True
+        return False
+
+    def _build_simple_condition(self, meta: Dict[str, object]) -> Callable[[Dict[str, object]], Tuple[bool, str]]:
+        interest = meta.get("interest")
+        subject = meta.get("subject")
+        threshold = meta.get("threshold", 0)
+        explanation = meta.get("explanation", "")
+
+        def condition(facts: Dict[str, object]) -> Tuple[bool, str]:
+            meets_interest = interest in facts["interests"] if interest else True
+            meets_grade = facts.get(subject, 0) >= threshold if subject else True
+            return meets_interest and meets_grade, explanation
+
+        return condition
+
 
 @dataclass
 class FiredRule:
@@ -442,6 +508,13 @@ class CLI:
     VALID_INTERESTS = {"Realistic", "Investigative", "Artistic", "Social", "Enterprising", "Conventional"}
     VALID_STYLES = {"visual", "auditori", "kinestetik"}
     VALID_ENVIRONMENTS = {"riset", "industri", "kreatif"}
+    GRADE_FIELDS = {
+        "math": "Nilai Matematika",
+        "physics": "Nilai Fisika",
+        "biology": "Nilai Biologi",
+        "chemistry": "Nilai Kimia",
+        "language": "Nilai Bahasa",
+    }
 
     def __init__(self) -> None:
         self.kb = KnowledgeBase()
@@ -449,7 +522,34 @@ class CLI:
         self.recommender = Recommender(self.kb, self.engine)
 
     def run(self) -> None:
-        print("=== Rekomendasi Jurusan Kuliah (Expert System) ===")
+        while True:
+            print("\n====== SISTEM PAKAR PENENTUAN JURUSAN ======")
+            print("1. Tambah Rule")
+            print("2. Lihat Basis Knowledge")
+            print("3. Update Rule")
+            print("4. Hapus Rule")
+            print("5. Jalankan Forward Chaining")
+            print("6. Keluar")
+            choice = input("Pilih menu: ").strip()
+
+            if choice == "1":
+                self._add_rule_menu()
+            elif choice == "2":
+                self._list_rules_menu()
+            elif choice == "3":
+                self._update_rule_menu()
+            elif choice == "4":
+                self._delete_rule_menu()
+            elif choice == "5":
+                self._run_forward_chaining()
+            elif choice == "6":
+                print("Terima kasih telah menggunakan sistem pakar.")
+                break
+            else:
+                print("Pilihan tidak dikenal, silakan coba lagi.")
+
+    def _run_forward_chaining(self) -> None:
+        print("=== Jalankan Forward Chaining ===")
         interests = self._ask_interests()
         grades = self._ask_grades()
         learning_style = self._ask_option("Gaya belajar (visual/auditori/kinestetik)", self.VALID_STYLES)
@@ -482,13 +582,7 @@ class CLI:
             print(f"Input tidak valid. Pilihan: {', '.join(sorted(self.VALID_INTERESTS))}.")
 
     def _ask_grades(self) -> Dict[str, float]:
-        return {
-            "math": self._ask_grade("Nilai Matematika"),
-            "physics": self._ask_grade("Nilai Fisika"),
-            "biology": self._ask_grade("Nilai Biologi"),
-            "chemistry": self._ask_grade("Nilai Kimia"),
-            "language": self._ask_grade("Nilai Bahasa"),
-        }
+        return {field: self._ask_grade(label) for field, label in self.GRADE_FIELDS.items()}
 
     def _ask_grade(self, prompt: str) -> float:
         while True:
@@ -505,6 +599,114 @@ class CLI:
             if value in valid_options:
                 return value
             print(f"Pilihan tidak valid. Gunakan salah satu: {', '.join(sorted(valid_options))}.")
+
+    def _add_rule_menu(self) -> None:
+        print("=== Tambah Rule ===")
+        name = input("Nama rule: ").strip()
+        if not name:
+            print("Nama rule tidak boleh kosong.")
+            return
+        major = input("Jurusan yang didukung: ").strip()
+        weight = self._ask_weight()
+
+        interest = self._ask_option(
+            "Minat utama yang harus dimiliki (Realistic/Investigative/Artistic/Social/Enterprising/Conventional)",
+            {i.lower() for i in self.VALID_INTERESTS},
+        ).capitalize()
+        subject = self._ask_option(
+            "Nilai mata pelajaran yang dicek (math/physics/biology/chemistry/language)",
+            set(self.GRADE_FIELDS.keys()),
+        )
+        threshold = self._ask_grade(f"Minimal {self.GRADE_FIELDS[subject]} untuk rule ini")
+        explanation = input("Penjelasan rule: ").strip() or "Rule tambahan dari pengguna."
+
+        meta = {
+            "interest": interest,
+            "subject": subject,
+            "threshold": threshold,
+            "explanation": explanation,
+            "major": major,
+            "weight": weight,
+        }
+        condition = self.kb._build_simple_condition(meta)
+        new_rule = Rule(name=name, major=major, weight=weight, condition=condition)
+        self.kb.add_rule(new_rule, meta=meta)
+        print(f"Rule '{name}' berhasil ditambahkan.")
+
+    def _list_rules_menu(self) -> None:
+        print("=== Basis Knowledge ===")
+        rules = self.kb.list_rules()
+        if not rules:
+            print("Belum ada rule yang tersimpan.")
+            return
+        for idx, rule in enumerate(rules, start=1):
+            print(f"{idx}. {rule.name} | Jurusan: {rule.major} | Bobot: {rule.weight}")
+
+    def _update_rule_menu(self) -> None:
+        print("=== Update Rule ===")
+        name = input("Masukkan nama rule yang ingin diupdate: ").strip()
+        if name not in {r.name for r in self.kb.list_rules()}:
+            print("Rule tidak ditemukan.")
+            return
+
+        major = input("Jurusan baru (kosongkan jika tidak berubah): ").strip()
+        weight_raw = input("Bobot baru 0-1 (kosongkan jika tidak berubah): ").strip()
+        weight = None
+        if weight_raw:
+            try:
+                weight = float(weight_raw)
+            except ValueError:
+                print("Bobot harus berupa angka desimal.")
+                return
+
+        meta = None
+        if name in self.kb.dynamic_rule_meta:
+            print("Rule ini dibuat melalui menu, Anda dapat memperbarui komponennya.")
+            interest = self._ask_option(
+                "Minat utama (Realistic/Investigative/Artistic/Social/Enterprising/Conventional)",
+                {i.lower() for i in self.VALID_INTERESTS},
+            ).capitalize()
+            subject = self._ask_option(
+                "Nilai mata pelajaran yang dicek (math/physics/biology/chemistry/language)",
+                set(self.GRADE_FIELDS.keys()),
+            )
+            threshold = self._ask_grade(f"Minimal {self.GRADE_FIELDS[subject]} untuk rule ini")
+            explanation = input("Penjelasan rule: ").strip() or "Rule tambahan dari pengguna."
+            meta = {
+                "interest": interest,
+                "subject": subject,
+                "threshold": threshold,
+                "explanation": explanation,
+                "major": major or self.kb.dynamic_rule_meta[name].get("major", ""),
+                "weight": weight if weight is not None else self.kb.dynamic_rule_meta[name].get("weight", 0.0),
+            }
+
+        updated = self.kb.update_rule(name, major=major or None, weight=weight, meta=meta)
+        if updated:
+            print("Rule berhasil diperbarui.")
+        else:
+            print("Gagal memperbarui rule.")
+
+    def _delete_rule_menu(self) -> None:
+        print("=== Hapus Rule ===")
+        name = input("Masukkan nama rule yang ingin dihapus: ").strip()
+        deleted = self.kb.delete_rule(name)
+        if deleted:
+            print(f"Rule '{name}' berhasil dihapus.")
+        else:
+            print("Rule tidak ditemukan.")
+
+    def _ask_weight(self) -> float:
+        while True:
+            raw = input("Bobot rule (0-1): ").strip()
+            try:
+                value = float(raw)
+            except ValueError:
+                print("Bobot harus berupa angka desimal.")
+                continue
+            if 0 <= value <= 1:
+                return value
+            print("Bobot harus di antara 0 dan 1.")
 
     def _display_results(self, recommendations: List[Dict[str, object]]) -> None:
         if not recommendations:
